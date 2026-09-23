@@ -84,8 +84,16 @@ class OverlayFrameRenderingTests(unittest.TestCase):
                                   ("circle", (240, 240), (120, 5))):
             with self.subTest(shape=shape):
                 _overlay, rendered = self._render(shape, *size)
-                self.assertGreater(rendered.pixelColor(*edge).red(), camera.red())
+                x, _y = edge
+                reds = [rendered.pixelColor(x, y).red() for y in (4, 5, 6, 7)]
+                self.assertTrue(all(a > b for a, b in zip(reds, reds[1:])),
+                                (shape, reds))
+                self.assertGreater(reds[0] - reds[1], reds[2] - reds[3])
+                self.assertGreater(reds[0], camera.red() + 55)
+                self.assertEqual(rendered.pixelColor(x, 8), camera)
                 self.assertEqual(rendered.pixelColor(size[0] // 2, size[1] // 2), camera)
+                if shape != "rect":
+                    self.assertEqual(rendered.pixelColor(0, 0).alpha(), 0)
 
     def test_recording_indicator_is_painted_above_the_frame(self) -> None:
         overlay, _rendered = self._render("rounded", 320, 180)

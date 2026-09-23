@@ -15,7 +15,6 @@ from PyQt6.QtWidgets import QApplication, QMenu, QWidget
 RESIZE_MARGIN = 12
 MIN_SIZE = 120
 OMARCHY_ACTIVE_BORDER = QColor("#eb6f92")
-OMARCHY_BORDER_GLOW = QColor(235, 111, 146, 28)
 
 
 class OverlayWindow(QWidget):
@@ -126,29 +125,25 @@ class OverlayWindow(QWidget):
     def _draw_omarchy_border(self, painter: QPainter, rect: QRectF) -> None:
         """Draw a restrained Rosé Pine border aligned with the content edge."""
         core_width = 3.0
-        glow_width = 4.0
-        inset = core_width / 2.0
-        edge_rect = rect.adjusted(inset, inset, -inset, -inset)
-        if self.shape == "rounded":
-            edge_path = QPainterPath()
-            radius = max(0, self.corner_radius - inset)
-            edge_path.addRoundedRect(edge_rect, radius, radius)
-        else:
-            edge_path = self._content_path(edge_rect)
-
         painter.save()
         painter.setClipPath(self._content_path(rect))
         painter.setBrush(Qt.BrushStyle.NoBrush)
 
-        shadow_pen = QPen(QColor(235, 111, 146, 22), 10.0)
-        shadow_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(shadow_pen)
-        painter.drawPath(edge_path)
+        # Concentric one-pixel bands approximate a soft inward gradient while
+        # retaining the same contour for rectangles, rounded frames and circles.
+        def inset_path(distance: float) -> QPainterPath:
+            inner = rect.adjusted(distance, distance, -distance, -distance)
+            if self.shape == "rounded":
+                path = QPainterPath()
+                radius = max(0, self.corner_radius - distance)
+                path.addRoundedRect(inner, radius, radius)
+                return path
+            return self._content_path(inner)
 
-        glow_pen = QPen(OMARCHY_BORDER_GLOW, glow_width)
-        glow_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(glow_pen)
-        painter.drawPath(edge_path)
+        painter.setPen(Qt.PenStyle.NoPen)
+        for distance, alpha in enumerate((105, 72, 42, 20, 7), start=3):
+            band = inset_path(distance).subtracted(inset_path(distance + 1))
+            painter.fillPath(band, QColor(235, 111, 146, alpha))
 
         # Fill the band between the actual content edge and its inset contour.
         # A centered stroke clipped to the outer path loses its outer AA samples.
