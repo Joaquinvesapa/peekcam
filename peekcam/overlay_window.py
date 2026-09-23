@@ -14,6 +14,8 @@ from PyQt6.QtWidgets import QApplication, QMenu, QWidget
 
 RESIZE_MARGIN = 12
 MIN_SIZE = 120
+OMARCHY_ACTIVE_BORDER = QColor("#eb6f92")
+OMARCHY_BORDER_GLOW = QColor(235, 111, 146, 28)
 
 
 class OverlayWindow(QWidget):
@@ -121,6 +123,47 @@ class OverlayWindow(QWidget):
             path.addRect(rect)
         return path
 
+    def _draw_omarchy_border(self, painter: QPainter, rect: QRectF) -> None:
+        """Draw a restrained Rosé Pine border aligned with the content edge."""
+        core_width = 3.0
+        glow_width = 4.0
+        inset = core_width / 2.0
+        edge_rect = rect.adjusted(inset, inset, -inset, -inset)
+        if self.shape == "rounded":
+            edge_path = QPainterPath()
+            radius = max(0, self.corner_radius - inset)
+            edge_path.addRoundedRect(edge_rect, radius, radius)
+        else:
+            edge_path = self._content_path(edge_rect)
+
+        painter.save()
+        painter.setClipPath(self._content_path(rect))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        shadow_pen = QPen(QColor(235, 111, 146, 22), 10.0)
+        shadow_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(shadow_pen)
+        painter.drawPath(edge_path)
+
+        glow_pen = QPen(OMARCHY_BORDER_GLOW, glow_width)
+        glow_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(glow_pen)
+        painter.drawPath(edge_path)
+
+        # Fill the band between the actual content edge and its inset contour.
+        # A centered stroke clipped to the outer path loses its outer AA samples.
+        inner_rect = rect.adjusted(core_width, core_width, -core_width, -core_width)
+        inner_path = QPainterPath()
+        if self.shape == "rounded":
+            radius = max(0, self.corner_radius - core_width)
+            inner_path.addRoundedRect(inner_rect, radius, radius)
+        else:
+            inner_path = self._content_path(inner_rect)
+        band = self._content_path(rect).subtracted(inner_path)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.fillPath(band, OMARCHY_ACTIVE_BORDER)
+        painter.restore()
+
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
         painter.setRenderHints(QPainter.RenderHint.Antialiasing
@@ -144,6 +187,8 @@ class OverlayWindow(QWidget):
             x = (scaled.width() - self.width()) // 2
             y = (scaled.height() - self.height()) // 2
             painter.drawImage(self.rect(), scaled, QRect(x, y, self.width(), self.height()))
+
+        self._draw_omarchy_border(painter, rectf)
 
         if self.border_width > 0 and self.border_color.alpha() > 0:
             pen = QPen(self.border_color, self.border_width)
