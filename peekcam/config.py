@@ -30,6 +30,7 @@ DEFAULTS: dict[str, Any] = {
     "border_color": "#00000000", # ARGB hex, transparent by default
     "mirror": True,             # webcams usually feel natural mirrored
     "always_on_top": True,
+    "show_on_all_workspaces": True,  # Hyprland overlay pin preference
     "click_through": False,
     "blur": False,              # background blur (needs mediapipe; see blur.py)
     # source / format

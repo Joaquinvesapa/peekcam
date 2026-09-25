@@ -19,7 +19,11 @@ Drag it to any corner and shape it — rectangle, rounded, or circle:
 GNOME's Wayland compositor (Mutter) doesn't let normal apps pin themselves always-on-top
 or position/resize themselves freely, and it doesn't support `wlr-layer-shell`. So
 PeekCam runs as an **X11 client under XWayland** (`QT_QPA_PLATFORM=xcb`, set by
-`run.sh`), where those capabilities work reliably. No system changes required.
+`run.sh`), where those capabilities work reliably. On Hyprland, PeekCam automatically
+pins its overlay across workspaces when `hyprctl` is available. The tray's checked
+**Show on all workspaces** action switches that pin on or off immediately and remembers
+your choice across restarts (on by default). The action is hidden on other compositors.
+Hyprland currently uses this same XWayland path. No system changes required.
 
 ## Install
 

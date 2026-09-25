@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import time
 
 # Must be set before QApplication is constructed. run.sh also exports this.
 os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
@@ -20,11 +22,14 @@ from PyQt6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon  #
 
 from . import APP_NAME, data_dir, device_manager, ipc, recorder  # noqa: E402
 from .config import Config  # noqa: E402
+from . import hyprland  # noqa: E402
 from .overlay_window import OverlayWindow  # noqa: E402
 from .pipeline import CameraPipeline  # noqa: E402
 from .settings_dialog import SettingsDialog  # noqa: E402
 
 ICON_PATH = os.path.join(data_dir(), "assets", "peekcam.png")
+_PIN_DELAY_MS = 100
+_PIN_RETRY_ATTEMPTS = 3
 
 
 def app_icon() -> QIcon:
@@ -49,6 +54,7 @@ class Controller:
     def __init__(self, app: QApplication):
         self.app = app
         self.config = Config.load()
+        self._workspace_pin_lock = threading.Lock()
         self.cameras: list[device_manager.Camera] = []
         self.cam_index = 0
 
@@ -73,8 +79,56 @@ class Controller:
 
         self._build_tray()
         self.overlay.show()
+        if hyprland.is_available() and self.config.get("show_on_all_workspaces"):
+            QTimer.singleShot(_PIN_DELAY_MS, self._pin_hyprland_window)
         # start capture shortly after the event loop is up
         QTimer.singleShot(0, self.start_default_capture)
+
+    def _pin_hyprland_window(self, attempts_remaining: int = _PIN_RETRY_ATTEMPTS) -> None:
+        """Start bounded Hyprland pin attempts without blocking Qt's event thread."""
+        if not self.config.get("show_on_all_workspaces"):
+            return
+        threading.Thread(
+            target=self._pin_hyprland_window_in_background,
+            args=(attempts_remaining,),
+            daemon=True,
+        ).start()
+
+    def _pin_hyprland_window_in_background(self, attempts_remaining: int) -> None:
+        """Retry the bounded pin operation outside Qt's event thread."""
+        for attempt in range(max(attempts_remaining, 1)):
+            with self._workspace_pin_lock:
+                if not self.config.get("show_on_all_workspaces"):
+                    return
+                if hyprland.pin_current_window():
+                    return
+            if attempt + 1 < max(attempts_remaining, 1):
+                if not self.config.get("show_on_all_workspaces"):
+                    return
+                time.sleep(_PIN_DELAY_MS / 1000)
+
+    def _set_workspace_pin(self, enabled: bool) -> None:
+        """Persist the preference on Qt's thread; dispatch compositor work in a daemon."""
+        self.config["show_on_all_workspaces"] = enabled
+        self.config.save()
+        if enabled:
+            self._pin_hyprland_window()
+        else:
+            threading.Thread(target=self._unpin_hyprland_window_in_background,
+                             daemon=True).start()
+
+    def _unpin_hyprland_window_in_background(self) -> None:
+        """Retry unpin outside Qt, serializing each attempt against pin attempts."""
+        for attempt in range(_PIN_RETRY_ATTEMPTS):
+            with self._workspace_pin_lock:
+                if self.config.get("show_on_all_workspaces"):
+                    return
+                if hyprland.unpin_current_window():
+                    return
+            if attempt + 1 < _PIN_RETRY_ATTEMPTS:
+                if self.config.get("show_on_all_workspaces"):
+                    return
+                time.sleep(_PIN_DELAY_MS / 1000)
 
     # ------------------------------------------------------------- capture
     def start_default_capture(self) -> None:
@@ -206,6 +260,12 @@ class Controller:
             a = QAction(label, menu)
             a.triggered.connect(slot)
             menu.addAction(a)
+        if hyprland.is_available():
+            a_workspaces = QAction("Show on all workspaces", menu)
+            a_workspaces.setCheckable(True)
+            a_workspaces.setChecked(bool(self.config.get("show_on_all_workspaces")))
+            a_workspaces.toggled.connect(self._set_workspace_pin)
+            menu.addAction(a_workspaces)
         menu.addSeparator()
         a_quit = QAction("Quit", menu)
         a_quit.triggered.connect(self.quit)
