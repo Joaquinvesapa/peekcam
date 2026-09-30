@@ -24,7 +24,7 @@ DEFAULTS: dict[str, Any] = {
     # window
     "geometry": None,            # [x, y, w, h] or None -> place bottom-right
     "shape": "rounded",         # "rect" | "rounded" | "circle"
-    "corner_radius": 18,
+    "corner_radius": 3,
     "opacity": 1.0,              # 0.2 .. 1.0
     "border_width": 2,
     "border_color": "#00000000", # ARGB hex, transparent by default

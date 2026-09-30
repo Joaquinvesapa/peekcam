@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import QApplication, QMenu, QWidget
 
 RESIZE_MARGIN = 12
 MIN_SIZE = 120
-OMARCHY_ACTIVE_BORDER = QColor("#eb6f92")
+SIDEBAR_BORDER_COLOR = QColor("#c1a5e4")
 
 
 class OverlayWindow(QWidget):
@@ -36,7 +36,7 @@ class OverlayWindow(QWidget):
 
         # appearance from config
         self.shape = config.get("shape", "rounded")
-        self.corner_radius = int(config.get("corner_radius", 18))
+        self.corner_radius = int(config.get("corner_radius", 3))
         self.border_width = int(config.get("border_width", 2))
         self.border_color = QColor(config.get("border_color", "#00000000"))
         self.mirror = bool(config.get("mirror", True))
@@ -122,41 +122,24 @@ class OverlayWindow(QWidget):
             path.addRect(rect)
         return path
 
-    def _draw_omarchy_border(self, painter: QPainter, rect: QRectF) -> None:
-        """Draw a restrained Rosé Pine border aligned with the content edge."""
-        core_width = 3.0
+    def _draw_sidebar_border(self, painter: QPainter, rect: QRectF) -> None:
+        """Draw a one-pixel lavender outline without glow, inside the content edge."""
+        width = 1.0
         painter.save()
-        painter.setClipPath(self._content_path(rect))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
+        outer_path = self._content_path(rect)
+        # The outline already follows the camera mask. Applying its clip again
+        # multiplies antialiased coverage and weakens the rounded corners.
+        painter.setClipping(False)
 
-        # Concentric one-pixel bands approximate a soft inward gradient while
-        # retaining the same contour for rectangles, rounded frames and circles.
-        def inset_path(distance: float) -> QPainterPath:
-            inner = rect.adjusted(distance, distance, -distance, -distance)
-            if self.shape == "rounded":
-                path = QPainterPath()
-                radius = max(0, self.corner_radius - distance)
-                path.addRoundedRect(inner, radius, radius)
-                return path
-            return self._content_path(inner)
-
-        painter.setPen(Qt.PenStyle.NoPen)
-        for distance, alpha in enumerate((105, 72, 42, 20, 7), start=3):
-            band = inset_path(distance).subtracted(inset_path(distance + 1))
-            painter.fillPath(band, QColor(235, 111, 146, alpha))
-
-        # Fill the band between the actual content edge and its inset contour.
-        # A centered stroke clipped to the outer path loses its outer AA samples.
-        inner_rect = rect.adjusted(core_width, core_width, -core_width, -core_width)
+        # Fill an inner-contained band to keep the full outline inside the mask.
+        inner_rect = rect.adjusted(width, width, -width, -width)
         inner_path = QPainterPath()
         if self.shape == "rounded":
-            radius = max(0, self.corner_radius - core_width)
+            radius = max(0, self.corner_radius - width)
             inner_path.addRoundedRect(inner_rect, radius, radius)
         else:
             inner_path = self._content_path(inner_rect)
-        band = self._content_path(rect).subtracted(inner_path)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.fillPath(band, OMARCHY_ACTIVE_BORDER)
+        painter.fillPath(outer_path.subtracted(inner_path), SIDEBAR_BORDER_COLOR)
         painter.restore()
 
     def paintEvent(self, _event) -> None:
@@ -183,7 +166,7 @@ class OverlayWindow(QWidget):
             y = (scaled.height() - self.height()) // 2
             painter.drawImage(self.rect(), scaled, QRect(x, y, self.width(), self.height()))
 
-        self._draw_omarchy_border(painter, rectf)
+        self._draw_sidebar_border(painter, rectf)
 
         if self.border_width > 0 and self.border_color.alpha() > 0:
             pen = QPen(self.border_color, self.border_width)

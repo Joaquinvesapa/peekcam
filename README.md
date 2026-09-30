@@ -100,6 +100,11 @@ then assign a shortcut.
 - Recordings → `~/Videos/peekcam-<timestamp>.mp4`
 - Config → `~/.config/peekcam/config.json`
 
+The thin lavender decorative frame (`#c1a5e4`, 1 px, no glow) and recording indicator
+are window-only Qt paint effects; they are not included in snapshots or recordings.
+Rounded windows default to a 3 px corner radius; existing `corner_radius` settings
+in the configuration are preserved.
+
 ## Layout
 
 | File | Purpose |
