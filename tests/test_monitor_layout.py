@@ -2,8 +2,8 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from PyQt6.QtCore import QObject, QPoint, QRect, pyqtSignal
-from PyQt6.QtGui import QMoveEvent
+from PyQt6.QtCore import QObject, QPoint, QRect, QSize, pyqtSignal
+from PyQt6.QtGui import QMoveEvent, QResizeEvent
 from PyQt6.QtWidgets import QApplication
 
 from peekcam.overlay_window import OverlayWindow
@@ -83,6 +83,108 @@ class MonitorLayoutTests(unittest.TestCase):
         self.assertTrue(self.overlay._layout_timer.isActive())
         self.app.processEvents()
         self.app.processEvents()
+
+    def deliver_geometry(self, rect):
+        old = self.overlay.geometry()
+        self.overlay.setGeometry(*rect)
+        self.app.sendEvent(self.overlay, QMoveEvent(QPoint(*rect[:2]), old.topLeft()))
+        self.app.sendEvent(self.overlay, QResizeEvent(QSize(*rect[2:]), old.size()))
+
+    def settle_geometry(self):
+        # Deterministically invoke the debounce timeout without sleeping.
+        self.overlay._geometry_timer.stop()
+        self.overlay._flush_geometry_save()
+
+    def test_initial_native_geometry_events_do_not_trigger_a_save(self):
+        self.deliver_geometry(tuple(self.config['geometry']))
+        self.assertFalse(self.overlay._geometry_timer.isActive())
+        self.settle_geometry()
+        self.config.save.assert_not_called()
+
+    def test_external_move_resize_burst_syncs_config_and_persists_latest_once(self):
+        self.config['show_on_all_workspaces'] = False
+        self.deliver_geometry((4600, 1000, 397, 218))
+        self.deliver_geometry((4500, 1100, 420, 240))
+        self.assertEqual(self.config['geometry'], [4500, 1100, 420, 240])
+        self.assertTrue(self.overlay._geometry_timer.isActive())
+        self.config.save.assert_not_called()
+        self.settle_geometry()
+        self.config.save.assert_called_once_with()
+        self.assertFalse(self.config['show_on_all_workspaces'])
+        self.deliver_geometry((4500, 1100, 420, 240))
+        self.assertFalse(self.overlay._geometry_timer.isActive())
+        self.settle_geometry()
+        self.config.save.assert_called_once_with()
+
+    def test_external_cross_output_move_commits_owner_after_debounce(self):
+        self.deliver_geometry((2100, 1180, 397, 218))
+        self.assertEqual(self.overlay._placement_monitor, 'DP-2')
+        self.settle_geometry()
+        self.assertEqual(self.overlay._placement_monitor, 'DP-3')
+        self.assertEqual(self.config['geometry'], [2100, 1180, 397, 218])
+        self.config.save.assert_called_once_with()
+        self.dp3.translate(2560, 0)
+        self.dp2.translate(0, 0)
+        self.flush()
+        self.assertEqual(self.overlay.geometry().getRect(), (4660, 1180, 397, 218))
+
+    def test_pending_external_save_is_cancelled_by_recovery(self):
+        self.deliver_geometry((4600, 1100, 376, 212))
+        self.dp2.translate(0, 0)
+        self.dp3.translate(2560, 0)
+        self.flush()
+        self.assertEqual(self.config['geometry'], [2040, 1100, 376, 212])
+        self.assertFalse(self.overlay._geometry_timer.isActive())
+        self.settle_geometry()
+        self.config.save.assert_called_once_with()
+
+    def test_recovery_commits_eager_config_update_without_duplicate_debounce_save(self):
+        # The compositor moves first; Config is current but nothing is on disk.
+        with patch.object(self.overlay, 'windowHandle') as handle:
+            handle.return_value.screen.return_value = self.dp2
+            self.deliver_geometry((2040, 1100, 376, 212))
+            self.assertEqual(self.config['geometry'], [2040, 1100, 376, 212])
+            self.config.save.assert_not_called()
+            self.assertTrue(self.overlay._geometry_timer.isActive())
+            self.dp2.translate(0, 0)
+            self.dp3.translate(2560, 0)
+            self.flush()
+            self.assertEqual(self.overlay.geometry().getRect(), (2040, 1100, 376, 212))
+            self.config.save.assert_called_once_with()
+            self.assertFalse(self.overlay._geometry_timer.isActive())
+            self.assertFalse(self.overlay._geometry_dirty)
+            self.settle_geometry()
+            self.dp2.geometryChanged.emit(self.dp2.rect)
+            self.flush()
+            self.config.save.assert_called_once_with()
+
+    def test_mouse_release_does_not_discard_pending_disk_save(self):
+        self.deliver_geometry((4500, 1000, 376, 212))
+        self.overlay.mouseReleaseEvent(None)
+        self.config.save.assert_not_called()
+        self.settle_geometry()
+        self.config.save.assert_called_once_with()
+
+    def test_geometry_debounce_filesystem_error_is_nonfatal(self):
+        self.deliver_geometry((4500, 1000, 376, 212))
+        self.config.save.side_effect = PermissionError('read-only config')
+        with patch('sys.stderr') as stderr:
+            self.settle_geometry()
+        self.assertEqual(self.config['geometry'], [4500, 1000, 376, 212])
+        self.assertTrue(stderr.write.called)
+
+    def test_deferred_startup_events_and_quit_preserve_saved_geometry(self):
+        self.overlay.stop_monitor_recovery()
+        self.overlay.deleteLater()
+        self.screens = []
+        self.primary = None
+        self.config = SavedConfig(None)
+        self.overlay = OverlayWindow(self.config)
+        self.deliver_geometry((0, 0, 640, 480))
+        self.overlay._save_geometry()
+        self.assertIsNone(self.config['geometry'])
+        self.assertFalse(self.overlay._geometry_timer.isActive())
+        self.config.save.assert_not_called()
 
     def test_translation_burst_tracks_survivor_and_persists_once(self):
         # User/compositor movement must supersede saved config coordinates.
@@ -326,7 +428,8 @@ class MonitorLayoutTests(unittest.TestCase):
         controller.config = self.config
         controller.pipeline = Mock()
         controller.app = Mock()
-        self.overlay.move(4200, 900)
+        self.deliver_geometry((4200, 900, 376, 212))
+        self.assertTrue(self.overlay._geometry_timer.isActive())
         self.config.save.side_effect = lambda: self.assertEqual(
             self.config['geometry'], [4200, 900, 376, 212])
         controller.quit()
@@ -334,6 +437,9 @@ class MonitorLayoutTests(unittest.TestCase):
         controller.pipeline.stop.assert_called_once_with()
         controller.app.quit.assert_called_once_with()
         self.assertFalse(self.overlay._layout_timer.isActive())
+        self.assertFalse(self.overlay._geometry_timer.isActive())
+        self.settle_geometry()
+        self.config.save.assert_called_once_with()
 
     def test_startup_empty_defers_save_until_usable_screens(self):
         self.overlay.stop_monitor_recovery()

@@ -18,6 +18,7 @@ from .geometry import monitor_for_geometry, normalize_geometry
 
 RESIZE_MARGIN = 12
 MIN_SIZE = 120
+GEOMETRY_SAVE_DELAY_MS = 250
 SIDEBAR_BORDER_COLOR = QColor("#c1a5e4")
 
 
@@ -64,6 +65,12 @@ class OverlayWindow(QWidget):
             self._save_geometry()
             if saved != config.get("geometry"):
                 self._persist_geometry()
+
+        self._geometry_dirty = False
+        self._geometry_stopped = False
+        self._geometry_timer = QTimer(self)
+        self._geometry_timer.setSingleShot(True)
+        self._geometry_timer.timeout.connect(self._flush_geometry_save)
 
         # A parented single-shot runs on Qt's thread and collapses signal bursts.
         self._layout_timer = QTimer(self)
@@ -243,6 +250,7 @@ class OverlayWindow(QWidget):
     def mouseReleaseEvent(self, _event) -> None:
         self._drag_offset = None
         self._resizing = False
+        self._queue_geometry_save()
         self._save_geometry()
 
     def wheelEvent(self, event) -> None:
@@ -363,6 +371,45 @@ class OverlayWindow(QWidget):
             name = self._monitor_snapshot[index][0] if index is not None else None
             if name == self._placement_monitor or self._drag_offset is not None:
                 self._remember_placement()
+        self._queue_geometry_save()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._queue_geometry_save()
+
+    def _queue_geometry_save(self) -> None:
+        # Ignore construction/deferred startup and shutdown events. Do not let a
+        # topology adjustment overwrite the durable recovery placement evidence.
+        if (not hasattr(self, '_geometry_timer') or self._geometry_stopped
+                or self._deferred_startup):
+            return
+        if (self._layout_timer.isActive()
+                or self._snapshot_monitors(QGuiApplication.screens()) != self._monitor_snapshot):
+            self._geometry_dirty = True
+            self._geometry_timer.start(GEOMETRY_SAVE_DELAY_MS)
+            return
+        actual = list(self.geometry().getRect())
+        if actual != self.config.get('geometry'):
+            # Keep the shared Config current before settings/tray saves, but do
+            # not change placement ownership until a cross-output move settles.
+            self.config['geometry'] = actual
+            self._geometry_dirty = True
+        if self._geometry_dirty:
+            self._geometry_timer.start(GEOMETRY_SAVE_DELAY_MS)
+
+    def _flush_geometry_save(self) -> None:
+        if self._geometry_stopped or self._deferred_startup or not self._geometry_dirty:
+            return
+        if (self._layout_timer.isActive()
+                or self._snapshot_monitors(QGuiApplication.screens()) != self._monitor_snapshot):
+            self._schedule_monitor_recovery()
+            self._geometry_timer.start(GEOMETRY_SAVE_DELAY_MS)
+            return
+        if not self._monitor_snapshot:
+            return
+        # Read live geometry, not a rectangle captured by an earlier event.
+        self._save_geometry()
+        self._persist_geometry()
 
     def _schedule_monitor_recovery(self, *_args) -> None:
         self._layout_timer.start(0)
@@ -423,11 +470,15 @@ class OverlayWindow(QWidget):
         if corrected != actual:
             self.setGeometry(*corrected)
         self._remember_placement()
-        if corrected != actual or deferred or (current != previous
+        # An early compositor move may already have updated the shared Config,
+        # but its debounced disk save is still outstanding. A topology recovery
+        # must commit that move even when no further correction is necessary.
+        pending_layout_save = current != previous and self._geometry_dirty
+        if corrected != actual or deferred or pending_layout_save or (current != previous
                                                and self.config.get('geometry') != list(corrected)):
             saved = self.config.get("geometry")
             self._save_geometry()
-            if corrected != actual or saved != self.config.get("geometry"):
+            if corrected != actual or pending_layout_save or saved != self.config.get("geometry"):
                 self._persist_geometry()
 
     def _persist_geometry(self) -> None:
@@ -438,10 +489,16 @@ class OverlayWindow(QWidget):
                 save()
             except OSError as error:
                 sys.stderr.write(f"[peekcam] Could not save recovered geometry: {error}\n")
+                return
+        if hasattr(self, '_geometry_timer'):
+            self._geometry_timer.stop()
+            self._geometry_dirty = False
 
     def stop_monitor_recovery(self) -> None:
         """Disconnect topology hooks before application shutdown."""
         self._layout_timer.stop()
+        self._geometry_stopped = True
+        self._geometry_timer.stop()
         for screen in list(self._screen_hooks):
             self._detach_screen(screen)
         if self._screen_app is not None:
@@ -463,11 +520,14 @@ class OverlayWindow(QWidget):
                   area.bottom() - self.height() - margin)
 
     def _save_geometry(self) -> None:
+        if getattr(self, '_deferred_startup', False):
+            return
         g = self.geometry()
         self.config["geometry"] = [g.x(), g.y(), g.width(), g.height()]
         if hasattr(self, '_monitor_snapshot'):
             self._remember_placement()
 
     def closeEvent(self, event) -> None:
+        self._queue_geometry_save()
         self._save_geometry()
         super().closeEvent(event)

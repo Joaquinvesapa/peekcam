@@ -4,7 +4,7 @@ positioning + click-through work on GNOME/Zorin Wayland, then runs the overlay.
 Usage:
     python -m peekcam                # launch the overlay (single instance)
     python -m peekcam --snapshot     # tell a running instance to take a snapshot
-    python -m peekcam --toggle-record --toggle-clickthrough --cycle-camera --show-hide --quit
+    python -m peekcam --toggle-record --toggle-clickthrough --cycle-camera --show --show-hide --quit
 """
 from __future__ import annotations
 
@@ -44,6 +44,7 @@ _ARG_TO_ACTION = {
     "--snapshot": "snapshot",
     "--toggle-record": "toggle-record",
     "--cycle-camera": "cycle-camera",
+    "--show": "show",
     "--show-hide": "show-hide",
     "--toggle-blur": "toggle-blur",
     "--quit": "quit",
@@ -199,6 +200,8 @@ class Controller:
             self.cycle_camera()
         elif action == "toggle-blur":
             self.toggle_blur()
+        elif action == "show":
+            self.overlay.show()
         elif action == "show-hide":
             self.overlay.setVisible(not self.overlay.isVisible())
         elif action == "quit":
@@ -313,8 +316,8 @@ def main() -> int:
     app.setWindowIcon(app_icon())
     QGuiApplication.setQuitOnLastWindowClosed(False)
 
-    # Single instance: if one is already running, toggle its visibility and exit.
-    if ipc.send_action("show-hide"):
+    # Single instance: repeated launches show the overlay, never hide it.
+    if ipc.send_action("show"):
         return 0
 
     controller = Controller(app)

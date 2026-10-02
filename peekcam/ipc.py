@@ -5,7 +5,7 @@ app listens on a named local socket and the *same* binary, invoked with an actio
 forwards that action to the running instance. Users bind these invocations to keys via
 GNOME Settings -> Keyboard -> Custom Shortcuts. See README.
 
-Actions: toggle-clickthrough, snapshot, toggle-record, cycle-camera, show-hide, quit.
+Actions: toggle-clickthrough, snapshot, toggle-record, cycle-camera, show, show-hide, toggle-blur, quit.
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 SERVER_NAME = "peekcam.ipc"
 VALID_ACTIONS = {
     "toggle-clickthrough", "snapshot", "toggle-record",
-    "cycle-camera", "show-hide", "toggle-blur", "quit",
+    "cycle-camera", "show", "show-hide", "toggle-blur", "quit",
 }
 
 

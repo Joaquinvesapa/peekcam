@@ -40,9 +40,16 @@ recording.
 - From the **applications menu**: “PeekCam”.
 - Or directly: `./run.sh`
 
+Launching again shows the existing overlay; it never hides an already visible one.
+Use `./run.sh --show` to explicitly show a running instance, or `--show-hide` to toggle
+its visibility. These actions do not change your workspace preference.
+
 Right-click the overlay (or use the tray icon) for Settings, Shape, Mirror,
 Click-through, Snapshot, Record, and Quit. `Ctrl + mouse-wheel` over the overlay adjusts
 opacity. Drag the bottom-right corner to resize; drag anywhere else to move.
+Position and size changes, including moves/resizes made by the compositor, are saved
+after a short debounce (250 ms). On startup or monitor-layout changes, unreachable
+geometry is recovered without overwriting a reachable placement.
 
 ## Settings
 
@@ -86,7 +93,8 @@ and accepts action flags that it forwards to the running instance:
 ./run.sh --toggle-clickthrough
 ./run.sh --cycle-camera
 ./run.sh --toggle-blur
-./run.sh --show-hide
+./run.sh --show         # show only (idempotent; requires a running instance)
+./run.sh --show-hide    # explicit visibility toggle
 ./run.sh --quit
 ```
 
