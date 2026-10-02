@@ -286,6 +286,8 @@ class Controller:
 
     # ------------------------------------------------------------------- quit
     def quit(self) -> None:
+        self.overlay.stop_monitor_recovery()
+        self.overlay._save_geometry()
         self.config.save()
         self.pipeline.stop()
         self.app.quit()

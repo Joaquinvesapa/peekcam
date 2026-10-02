@@ -7,10 +7,14 @@ Runs as an X11 client under XWayland (see main.py) so always-on-top + free posit
 """
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QPoint, QRect, QRectF, QSize, pyqtSignal
+import sys
+
+from PyQt6.QtCore import Qt, QPoint, QRect, QRectF, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import (QAction, QColor, QCursor, QImage, QPainter, QPainterPath,
                          QPen, QPixmap, QGuiApplication)
 from PyQt6.QtWidgets import QApplication, QMenu, QWidget
+
+from .geometry import monitor_for_geometry, normalize_geometry
 
 RESIZE_MARGIN = 12
 MIN_SIZE = 120
@@ -47,12 +51,35 @@ class OverlayWindow(QWidget):
         self.setWindowTitle("PeekCam")
         self.setWindowOpacity(float(config.get("opacity", 1.0)))
 
-        geo = config.get("geometry")
-        if geo and len(geo) == 4:
-            self.setGeometry(*geo)
-        else:
-            self.resize(360, 240)
-            self._move_to_corner()
+        screens = QGuiApplication.screens()
+        areas = [screen.availableGeometry().getRect() for screen in screens]
+        primary = QGuiApplication.primaryScreen()
+        preferred = primary.availableGeometry().getRect() if primary else None
+        saved = config.get("geometry")
+        geometry = normalize_geometry(saved, areas, preferred)
+        self.setGeometry(*geometry)
+        self._deferred_startup = not any(w > 0 and h > 0 for _, _, w, h in areas)
+        self._startup_geometry = self.geometry().getRect()
+        if not self._deferred_startup:
+            self._save_geometry()
+            if saved != config.get("geometry"):
+                self._persist_geometry()
+
+        # A parented single-shot runs on Qt's thread and collapses signal bursts.
+        self._layout_timer = QTimer(self)
+        self._layout_timer.setSingleShot(True)
+        self._layout_timer.timeout.connect(self._recover_monitor_layout)
+        self._screen_hooks = {}
+        self._monitor_snapshot = self._snapshot_monitors(screens)
+        self._placement_geometry = self.geometry().getRect()
+        self._placement_monitor = None
+        self._remember_placement()
+        self._screen_app = QGuiApplication.instance()
+        self._screen_app.screenAdded.connect(self._screen_added)
+        self._screen_app.screenRemoved.connect(self._screen_removed)
+        self._screen_app.primaryScreenChanged.connect(self._schedule_monitor_recovery)
+        for screen in screens:
+            self._attach_screen(screen)
 
     # ------------------------------------------------------------ window flags
     def _apply_window_flags(self, initial: bool = False) -> None:
@@ -274,6 +301,155 @@ class OverlayWindow(QWidget):
         return menu
 
     # ------------------------------------------------------------------ layout
+    @staticmethod
+    def _snapshot_monitors(screens):
+        # Store values, not QScreen wrappers: removed QScreens may be destroyed.
+        return [(screen.name(), screen.geometry().getRect(),
+                 screen.availableGeometry().getRect()) for screen in screens
+                if screen.availableGeometry().width() > 0
+                and screen.availableGeometry().height() > 0]
+
+    def _attach_screen(self, screen) -> None:
+        if screen in self._screen_hooks:
+            return
+        signals = (screen.geometryChanged, screen.availableGeometryChanged)
+        for signal in signals:
+            signal.connect(self._schedule_monitor_recovery)
+        self._screen_hooks[screen] = signals
+
+    def _detach_screen(self, screen) -> None:
+        for signal in self._screen_hooks.pop(screen, ()):
+            try:
+                signal.disconnect(self._schedule_monitor_recovery)
+            except (TypeError, RuntimeError):
+                # Qt may already have destroyed the removed screen.
+                pass
+
+    def _screen_added(self, screen) -> None:
+        self._attach_screen(screen)
+        self._schedule_monitor_recovery()
+
+    def _screen_removed(self, screen) -> None:
+        self._detach_screen(screen)
+        self._schedule_monitor_recovery()
+
+    def _window_monitor_name(self):
+        handle = self.windowHandle()
+        screen = handle.screen() if handle is not None else None
+        return screen.name() if screen is not None else None
+
+    def _remember_placement(self) -> None:
+        """Record ownership only against a stable layout, never obsolete rectangles."""
+        previous = self._monitor_snapshot
+        if not previous or self._snapshot_monitors(QGuiApplication.screens()) != previous:
+            return
+        actual = self.geometry().getRect()
+        index = monitor_for_geometry(actual, [rect for _, rect, _ in previous])
+        name = previous[index][0] if index is not None else None
+        identity = self._window_monitor_name()
+        # A compositor move can arrive before the screen geometry notification.
+        if identity in [entry[0] for entry in previous] and identity != name:
+            return
+        self._placement_geometry = actual
+        self._placement_monitor = name
+
+    def moveEvent(self, event) -> None:
+        super().moveEvent(event)
+        if hasattr(self, '_monitor_snapshot'):
+            # Cross-output user drags are committed on mouse release. Unsolicited
+            # moves onto another output may be an early compositor adjustment.
+            index = monitor_for_geometry(self.geometry().getRect(),
+                                         [rect for _, rect, _ in self._monitor_snapshot])
+            name = self._monitor_snapshot[index][0] if index is not None else None
+            if name == self._placement_monitor or self._drag_offset is not None:
+                self._remember_placement()
+
+    def _schedule_monitor_recovery(self, *_args) -> None:
+        self._layout_timer.start(0)
+
+    def _recover_monitor_layout(self) -> None:
+        screens = QGuiApplication.screens()
+        for screen in list(self._screen_hooks):
+            if screen not in screens:
+                self._detach_screen(screen)
+        for screen in screens:
+            self._attach_screen(screen)
+        current = self._snapshot_monitors(screens)
+        if not current:
+            # Retain the last usable origins across temporary empty layouts.
+            return
+        actual = self.geometry().getRect()
+        candidate = actual
+        previous = self._monitor_snapshot
+        name = self._placement_monitor
+        # During topology changes QWindow identity may lag the compositor move.
+        # Only stable layouts may use it to supersede durable placement ownership.
+        if current == previous and actual != self._placement_geometry:
+            identity = self._window_monitor_name()
+            if identity in [entry[0] for entry in previous]:
+                name = identity
+        old_matches = [entry for entry in previous if entry[0] == name]
+        survivors = [entry for entry in current if entry[0] == name]
+        # Missing/duplicate ownership is not evidence for translating reachable
+        # geometry using obsolete rectangles.
+        old = old_matches[0] if len(old_matches) == 1 else None
+        survivor = survivors[0] if len(survivors) == 1 else None
+        target = None
+        if old is not None and survivor is not None:
+            _, old_rect, _ = old
+            _, new_rect, area = survivor
+            dx, dy = new_rect[0] - old_rect[0], new_rect[1] - old_rect[1]
+            # Unchanged placement is durable pre-change evidence. If it changed,
+            # translate only when still on that old output and not already usable
+            # on its new area. Otherwise preserve a possibly compositor-moved window.
+            on_old = monitor_for_geometry(actual, [old_rect]) is not None
+            usable_new = normalize_geometry(actual, [area], area) == actual
+            if actual == self._placement_geometry or (on_old and not usable_new):
+                candidate = (actual[0] + dx, actual[1] + dy, *actual[2:])
+                target = area
+            elif usable_new:
+                target = area
+        primary = QGuiApplication.primaryScreen()
+        preferred = primary.availableGeometry().getRect() if primary else None
+        areas = [area for _, _, area in current]
+        # A survivor's translation takes precedence over stale global overlap.
+        if self._deferred_startup and actual == self._startup_geometry:
+            candidate = self.config.get("geometry")
+        corrected = normalize_geometry(candidate, [target] if target else areas,
+                                       target or preferred)
+        self._monitor_snapshot = current
+        deferred = self._deferred_startup
+        self._deferred_startup = False
+        if corrected != actual:
+            self.setGeometry(*corrected)
+        self._remember_placement()
+        if corrected != actual or deferred or (current != previous
+                                               and self.config.get('geometry') != list(corrected)):
+            saved = self.config.get("geometry")
+            self._save_geometry()
+            if corrected != actual or saved != self.config.get("geometry"):
+                self._persist_geometry()
+
+    def _persist_geometry(self) -> None:
+        # Plain dict configurations remain useful for embedding and widget tests.
+        save = getattr(self.config, "save", None)
+        if save is not None:
+            try:
+                save()
+            except OSError as error:
+                sys.stderr.write(f"[peekcam] Could not save recovered geometry: {error}\n")
+
+    def stop_monitor_recovery(self) -> None:
+        """Disconnect topology hooks before application shutdown."""
+        self._layout_timer.stop()
+        for screen in list(self._screen_hooks):
+            self._detach_screen(screen)
+        if self._screen_app is not None:
+            self._screen_app.screenAdded.disconnect(self._screen_added)
+            self._screen_app.screenRemoved.disconnect(self._screen_removed)
+            self._screen_app.primaryScreenChanged.disconnect(self._schedule_monitor_recovery)
+            self._screen_app = None
+
     def sizeHint(self) -> QSize:
         return QSize(360, 240)
 
@@ -289,6 +465,8 @@ class OverlayWindow(QWidget):
     def _save_geometry(self) -> None:
         g = self.geometry()
         self.config["geometry"] = [g.x(), g.y(), g.width(), g.height()]
+        if hasattr(self, '_monitor_snapshot'):
+            self._remember_placement()
 
     def closeEvent(self, event) -> None:
         self._save_geometry()
